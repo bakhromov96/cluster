@@ -6,36 +6,22 @@ class Service {
         if( this.isClusterMode ) {
             this.clusterOptions = options.cluster;
         }
-        this.workerCount = process.env.WORKER_COUNT || 2; // declaring number of workers
-        this.stopTriger = false; // 
-        this.workersToStop = [];
         this.PORT = 3000;
         this.server;
+        this.child;
+        this.stopping = false;
     }
 
     async start() {
         
         if( this.isClusterMode ) {
-        
-            if( this.clusterOptions.isMaster) {
-        
-                await this.startCluster();
-        
-                if( this.transport.isPermanentConnection ) {
-                    await this.startTransport();
-                }
-        
-            }
-            else {
-        
-                await this.startWorker();
-        
-                if( !this.transport.isPermanentConnection ) {
-                    await this.startTransport();
-                }
-        
-            }
-        
+            await this.startCluster();
+
+            await this.startWorker();
+
+            if( !this.transport.isPermanentConnection ) {
+                await this.startTransport();
+            }    
         }
         else {
             await this.startWorker();
@@ -58,98 +44,51 @@ class Service {
     async startWorker() {
         //todo: логика запуска обработчика запросов
         this.server = this.transport.createServer().listen(this.PORT);
-        
-        console.log('Worker with pid : %d is started working and listening on PORT : %d', process.pid, this.PORT);
     }
 
     /* This function is called when isMaster return true, then childs are forked*/
     async startCluster() {
         //todo: логика запуска дочерних процессов
-        
-        for (var i = await this.workersCount(); i < this.workerCount; i++) {
-            this.clusterOptions.fork(); 
-        }
+        console.log('Is working');
+        this.child = this.clusterOptions(__dirname + '/task');
         
         console.log('Master with pid : ', process.pid, ' booted');
 
+        this.child.send('START');
         // A worker has disconnected either because the process was killed
         // or we are processing the workersToStop array restarting each process
         // In either case, we will fork any workers needed
-        this.clusterOptions.on('exit',async (worker,code,signal) => {
-            if(worker.state == 'dead'){
-                console.log('Worker was killed by signal');
-                this.forkingNewWorkers();
-            }
+        this.child.on('exit', (code,signal) => {
+            console.log(`Child killed with code ${signal}`);
+            this.child.kill();
+            this.forkingNewWorkers();
         });
 
         // HUP signal sent to the master process to start restarting all the workers sequentially
         process.on('SIGHUP',() => {
-            this.restartingAllWorkers();
+            console.log('Child process is restarting');
+            this.child.send('SIGINT');
+            this.forkingNewWorkers();
         });
 
         // Kill all the workers at once
         process.on('SIGTERM',() => {
-            this.stoppingAllWorkers();
+            console.log('All processes are terminated');
+            this.stopping = true;
+            this.child.send('SIGINT');
         });
     }
     
     /* This function for creating workers*/
     async forkingNewWorkers(){
         try{
-            if (!this.stopTriger) {
-                for (var i = await this.workersCount(); i < this.workerCount; i++) { this.clusterOptions.fork(); }
+            if(!this.stopping){
+                this.child = this.clusterOptions(__dirname + '/task');  
+                this.child.send('START');  
             }
         }
         catch(err){
             console.error(err);
-        }
-    }
-    
-    /* This function is called for stopping next worker process*/
-    async stoppingNextWorker(){
-        
-        var arr = this.workersToStop;
-
-        var i = arr.pop();
-        
-        var worker = this.clusterOptions.workers[i];
-        
-        if (worker) await this.stoppingWorker(worker);
-    
-    }
-    
-    /* This function is called for stopping worker process*/
-    async stoppingWorker(worker){
-        console.log('Worker with pid : %d is stopped', worker.process.pid);
-        worker.disconnect();
-        var killTimer = setTimeout(function() {
-        worker.kill();
-        }, 5000);
-        // Ensure we don't stay up just for this setTimeout
-        killTimer.unref();
-    }
-    
-    /* This function return number of online workers*/
-    async workersCount(){
-        return Object.keys(this.clusterOptions.workers).length;
-    }
-    
-    /* This function is called for restarting all workers*/
-    async restartingAllWorkers(){
-        console.log('Restarting all workers');
-        this.workersToStop = Object.keys(this.clusterOptions.workers);
-        for (var i = 0; i < this.workerCount; i++) {
-            await this.stoppingNextWorker();
-        }
-        
-    }
-
-    /* This function is called for stopping all workers*/
-    async stoppingAllWorkers(){
-        console.log('Stopping all workers');
-        this.stopTriger = true;
-        for(var id in this.clusterOptions.workers){
-           await this.stoppingWorker(this.clusterOptions.workers[id]);
         }
     }
 
